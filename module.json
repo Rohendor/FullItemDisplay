@@ -1,0 +1,43 @@
+{
+  "id": "full-item-display",
+  "title": "Full Item Display",
+  "version": "0.0.0",
+  "compatibility": {
+    "minimum": "12",
+    "verified": "12"
+  },
+    "relationships": {
+    "systems": [
+      {
+        "id": "custom-system-builder",
+        "type": "system",
+        "compatibility": {
+		"minimum": "4.0.0",
+		"verified": "4.6.1"
+		}
+      }
+    ],
+    "recommends": [
+      {
+        "id": "dice-so-nice",
+        "type": "module",
+        "compatibility": {}
+      }
+    ]
+  },
+  "authors": [
+    {
+      "name": "Rohendor",
+      "url": "https://github.com/Rohendor",
+      "discord": "rohendor",
+      "github": "rohendor",
+      "flags": {}
+    }
+  ],
+  	"styles": [],
+    "esmodules": [
+	  "/csb-components/module/sheets/components/FullItemDisplay.js"
+	],
+  "url": "https://github.com/Rohendor/FullItemDisplay",
+  "manifest": "https://github.com/Rohendor/FullItemDisplay/releases/latest/download/module.json",
+}
