@@ -297,7 +297,7 @@ class FullItemDisplay extends Container {
 
 export default FullItemDisplay;
 
-Hooks.once('init', () => {
+Hooks.on('init', () => {
   console.log("====================================Initialize Full Item Display============================================")
   componentFactory.addComponentType('fullItemDisplay', FullItemDisplay);
 });
