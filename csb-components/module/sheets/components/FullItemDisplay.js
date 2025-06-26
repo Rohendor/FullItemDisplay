@@ -1,9 +1,10 @@
-// FullItemDisplay Component for Custom System Builder
+// FullItemDisplay Component for Custom System Builder - Enhanced with Active Effects Support
 // Displays the complete structure of EquippableItems within character sheets
 
 import Container from '../../../../../../systems/custom-system-builder/module/sheets/components/Container.js';
 import { castToPrimitive } from '../../../../../../systems/custom-system-builder/module/utils.js';
 import Formula from '../../../../../../systems/custom-system-builder/module/formulas/Formula.js';
+import { CustomItem } from '../../../../../../systems/custom-system-builder/module/documents/item.js';
 
 class FullItemDisplay extends Container {
   constructor(props) {
@@ -17,6 +18,10 @@ class FullItemDisplay extends Container {
     this._showItemControls = props.showItemControls ?? true;
     this._itemLayout = props.itemLayout ?? 'vertical';
     this._hideEmpty = props.hideEmpty ?? false;
+    
+    // Track transferred effects for cleanup and change detection
+    this._transferredEffects = new Map();
+    this._lastEffectsHash = new Map(); // Track hash of effects to detect changes
   }
 
   async _getElement(entity, isEditable = true, options = {}) {
@@ -28,6 +33,17 @@ class FullItemDisplay extends Container {
     if (this._hideEmpty && relevantItems.length === 0 && !entity.isTemplate) {
       jQElement.addClass('hidden');
       return jQElement;
+    }
+
+    // Transfer active effects from nested items to the parent actor (only if needed)
+    if (!entity.isTemplate && entity.entity?.isOwner) {
+      const needsUpdate = await this._checkIfEffectsNeedUpdate(relevantItems, entity);
+      if (needsUpdate) {
+        console.log(`[FullItemDisplay] Effects need update for ${entity.entity.name}`);
+        await this._transferNestedActiveEffects(relevantItems, entity);
+      } else {
+        console.log(`[FullItemDisplay] No effect changes detected for ${entity.entity.name}, skipping transfer`);
+      }
     }
 
     if (this._title) {
@@ -57,6 +73,267 @@ class FullItemDisplay extends Container {
     return jQElement;
   }
 
+  /**
+   * Check if a field update might affect active effects
+   */
+  _updateMightAffectEffects(fieldPath, value, item) {
+    // Define patterns that might affect active effects
+    const effectRelatedPatterns = [
+      /^effects\./,           // Direct effect changes
+      /\.effects\./,          // Nested effect changes
+      /^system\.effects/,     // System effects
+      /\.transfer$/,          // Transfer property changes
+      /\.disabled$/,          // Disabled state changes
+      /\.changes\./,          // Effect changes array
+      /\.duration\./,         // Duration changes
+      /\.flags\./,            // Flag changes that might affect effects
+      /^flags\./,             // Top-level flag changes
+      /equipped$/,            // Equipment state (might affect effect transfer)
+      /active$/,              // Active state
+      /enabled$/,             // Enabled state
+      /\.active$/,            // Nested active state
+      /\.enabled$/,           // Nested enabled state
+    ];
+
+    // Check if the field path matches any effect-related pattern
+    const matchesPattern = effectRelatedPatterns.some(pattern => pattern.test(fieldPath));
+    
+    if (matchesPattern) {
+      return true;
+    }
+
+
+    const hasConditionalEffects = this._itemHasConditionalEffects(item);
+    if (hasConditionalEffects) {
+
+      const conditionalPatterns = [
+        /\.value$/,            // Value changes
+        /\.current$/,          // Current value changes
+        /\.max$/,              // Maximum value changes
+      ];
+      
+      return conditionalPatterns.some(pattern => pattern.test(fieldPath));
+    }
+
+    return false;
+  }
+
+  /**
+   * Check if an item has conditional effects that might depend on other properties
+   */
+  _itemHasConditionalEffects(item) {
+    // Get all nested items with effects
+    const itemsWithEffects = this._getNestedItemsWithEffects(item);
+    
+    for (const nestedItem of itemsWithEffects) {
+      for (const effect of nestedItem.effects) {
+        // Check if any effect changes reference variables or formulas
+        for (const change of effect.changes) {
+          if (typeof change.value === 'string') {
+            // Look for formula patterns (customize based on your system)
+            if (change.value.includes('@') || 
+                change.value.includes('{{') || 
+                change.value.includes('${') ||
+                change.value.includes('system.') ||
+                change.value.includes('props.')) {
+              return true;
+            }
+          }
+        }
+        
+        // Check if effect has conditional flags or duration formulas
+        if (effect.flags && typeof effect.flags === 'object') {
+          const flagString = JSON.stringify(effect.flags);
+          if (flagString.includes('@') || 
+              flagString.includes('{{') || 
+              flagString.includes('system.') ||
+              flagString.includes('props.')) {
+            return true;
+          }
+        }
+      }
+    }
+    
+    return false;
+  }
+
+  /**
+   * Check if active effects need to be updated by comparing current state with cached hash
+   */
+  async _checkIfEffectsNeedUpdate(items, parentEntity) {
+    const actor = parentEntity.entity;
+    if (!actor || actor.documentName !== 'Actor') return false;
+
+    const actorId = actor.id;
+    const currentEffectsHash = this._generateEffectsHash(items);
+    const lastHash = this._lastEffectsHash.get(actorId);
+
+    // Check if this is the first time or if the hash has changed
+    const needsUpdate = !lastHash || lastHash !== currentEffectsHash;
+    
+    if (needsUpdate) {
+      this._lastEffectsHash.set(actorId, currentEffectsHash);
+    }
+
+    return needsUpdate;
+  }
+
+  /**
+   * Generate a hash of all relevant active effects from nested items
+   */
+  _generateEffectsHash(items) {
+    const effectsData = [];
+    
+    for (const item of items) {
+      const nestedItemsWithEffects = this._getNestedItemsWithEffects(item);
+      
+      for (const nestedItem of nestedItemsWithEffects) {
+        const transferableEffects = nestedItem.effects.filter(effect => 
+          effect.transfer && !effect.disabled
+        );
+
+        for (const effect of transferableEffects) {
+          // Create a simplified representation for hashing
+          effectsData.push({
+            itemId: nestedItem.id,
+            parentId: item.id,
+            effectId: effect.id,
+            name: effect.name,
+            disabled: effect.disabled,
+            transfer: effect.transfer,
+            // Include key effect properties that would affect the transfer
+            changes: effect.changes.map(change => ({
+              key: change.key,
+              value: change.value,
+              mode: change.mode
+            })),
+            // Include flags that might affect behavior
+            flags: effect.flags,
+            // Include timing properties
+            duration: {
+              startTime: effect.duration?.startTime,
+              seconds: effect.duration?.seconds,
+              rounds: effect.duration?.rounds,
+              turns: effect.duration?.turns
+            }
+          });
+        }
+      }
+    }
+
+    // Create a simple hash from the stringified data
+    return this._hashString(JSON.stringify(effectsData));
+  }
+
+  /**
+   * Simple string hashing function
+   */
+  _hashString(str) {
+    let hash = 0;
+    if (str.length === 0) return hash;
+    for (let i = 0; i < str.length; i++) {
+      const char = str.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash = hash & hash; // Convert to 32-bit integer
+    }
+    return hash.toString();
+  }
+
+  /**
+   * Transfer active effects from nested items to the parent actor
+   * This handles the case where items contain other items with active effects
+   */
+  async _transferNestedActiveEffects(items, parentEntity) {
+    const actor = parentEntity.entity;
+    if (!actor || actor.documentName !== 'Actor') return;
+
+    // Clean up previously transferred effects
+    await this._cleanupTransferredEffects(actor);
+
+    for (const item of items) {
+      // Get all nested items that have active effects
+      const nestedItemsWithEffects = this._getNestedItemsWithEffects(item);
+      
+      for (const nestedItem of nestedItemsWithEffects) {
+        const effectsToTransfer = nestedItem.effects.filter(effect => 
+          effect.transfer && !effect.disabled
+        );
+
+        for (const effect of effectsToTransfer) {
+          try {
+            // Create a copy of the effect on the actor
+            const effectData = effect.toObject();
+            
+            // Mark this effect as transferred by this component
+            effectData.flags = effectData.flags || {};
+            effectData.flags['custom-system-builder'] = effectData.flags['custom-system-builder'] || {};
+            effectData.flags['custom-system-builder'].transferredBy = this.key;
+            effectData.flags['custom-system-builder'].sourceItemId = nestedItem.id;
+            effectData.flags['custom-system-builder'].sourceItemName = nestedItem.name;
+            effectData.flags['custom-system-builder'].parentItemId = item.id;
+            effectData.flags['custom-system-builder'].parentItemName = item.name;
+            
+            // Modify the effect name to show the source
+            effectData.name = `${effectData.name} (from ${nestedItem.name})`;
+            
+            const createdEffect = await actor.createEmbeddedDocuments('ActiveEffect', [effectData]);
+            
+            // Track the created effect for cleanup
+            if (!this._transferredEffects.has(actor.id)) {
+              this._transferredEffects.set(actor.id, []);
+            }
+            this._transferredEffects.get(actor.id).push(createdEffect[0].id);
+            
+            console.log(`[FullItemDisplay] Transferred active effect "${effect.name}" from ${nestedItem.name} to ${actor.name}`);
+          } catch (error) {
+            console.error(`[FullItemDisplay] Error transferring active effect from ${nestedItem.name}:`, error);
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Recursively find all nested items that have active effects
+   */
+  _getNestedItemsWithEffects(item) {
+    const itemsWithEffects = [];
+    
+    // Check if this item has effects
+    if (item.effects && item.effects.size > 0) {
+      itemsWithEffects.push(item);
+    }
+    
+    // Check nested items recursively
+    if (item.items) {
+      for (const nestedItem of item.items) {
+        itemsWithEffects.push(...this._getNestedItemsWithEffects(nestedItem));
+      }
+    }
+    
+    return itemsWithEffects;
+  }
+
+  /**
+   * Clean up previously transferred effects
+   */
+  async _cleanupTransferredEffects(actor) {
+    const existingTransferredEffects = actor.effects.filter(effect => 
+      effect.flags?.['custom-system-builder']?.transferredBy === this.key
+    );
+
+    if (existingTransferredEffects.length > 0) {
+      const effectIds = existingTransferredEffects.map(effect => effect.id);
+      await actor.deleteEmbeddedDocuments('ActiveEffect', effectIds);
+      console.log(`[FullItemDisplay] Cleaned up ${effectIds.length} previously transferred effects`);
+    }
+
+    // Clear our tracking
+    if (this._transferredEffects.has(actor.id)) {
+      this._transferredEffects.delete(actor.id);
+    }
+  }
+
   async _renderFullItemStructure(item, entity, isEditable, options) {
     const itemWrapper = $('<div></div>').addClass('custom-system-full-item-wrapper').attr('data-item-id', item.id);
     const itemTemplate = game.items?.get(item.system.template);
@@ -64,7 +341,9 @@ class FullItemDisplay extends Container {
     if (!itemTemplate) {
       return $('<div></div>').addClass('custom-system-item-template-error').html(`<i class="fas fa-exclamation-triangle"></i> Template not found for item: ${item.name}`);
     }
-      item.entity = entity.entity
+    
+    item.entity = entity.entity;
+    
     if (this._collapsibleItems) {
       const isExpanded = game.user.getFlag(game.system.id, `${entity.uuid}.${this.templateAddress}.${item.id}.expanded`) ?? !this._defaultItemCollapsed;
       const detailsElement = $('<details></details>').addClass('custom-system-full-item-details');
@@ -124,8 +403,14 @@ class FullItemDisplay extends Container {
             yes: () => true,
             no: () => false
           });
-          if (confirmed) await item.delete();
-          entity.render(false);
+          if (confirmed) {
+            // Clean up transferred effects before deleting
+            if (entity.entity && entity.entity.documentName === 'Actor') {
+              await this._cleanupTransferredEffects(entity.entity);
+            }
+            await item.delete();
+            entity.render(false);
+          }
         });
 
       controlsDiv.append(editButton).append(deleteButton);
@@ -173,6 +458,18 @@ class FullItemDisplay extends Container {
           const value = input.type === 'checkbox' ? input.checked : input.value;
           try {
             await item.update({ [path]: value });
+            
+            // Only mark effects as needing update if the change might affect active effects
+            if (entity.entity && entity.entity.documentName === 'Actor') {
+              const mightAffectEffects = this._updateMightAffectEffects(path, value, item);
+              if (mightAffectEffects) {
+                // Clear the hash to force re-evaluation on next render
+                this._lastEffectsHash.delete(entity.entity.id);
+                console.log(`[FullItemDisplay] Item ${item.name} field '${path}' updated, effects will be re-evaluated on next render`);
+              } else {
+                console.log(`[FullItemDisplay] Item ${item.name} field '${path}' updated, but won't affect effects`);
+              }
+            }
           } catch (err) {
             console.error(`Error updating item field '${path}'`, err);
           }
@@ -302,3 +599,25 @@ Hooks.on('init', () => {
   componentFactory.addComponentType('fullItemDisplay', FullItemDisplay);
 });
 
+
+Hooks.once('init', () => {
+    Object.defineProperty(CustomItem.prototype, 'getSortedConditionalModifiers', {
+        value: function() {
+            return {};
+        },
+        writable: true,
+        enumerable: false,
+        configurable: true
+    });
+    
+    Object.defineProperty(CustomItem.prototype, 'getSortedActiveEffects', {
+        value: function(system, includeDisabled = false) {
+            return {};
+        },
+        writable: true,
+        enumerable: false,
+        configurable: true
+    });
+    
+    console.log('CustomItem methods added successfully');
+});
